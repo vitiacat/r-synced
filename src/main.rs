@@ -64,7 +64,8 @@ struct AppState {
     time: bool,
     group: bool,
     compress: bool,
-    excluded: Vec<String>,
+    excluded: String,
+    included: String,
 }
 
 fn create_rsync_command(state: &AppState) -> Command {
@@ -97,6 +98,14 @@ fn create_rsync_command(state: &AppState) -> Command {
         cmd.arg("-z");
     }
 
+    for excluded in state.excluded.lines() {
+        cmd.arg("--exclude").arg(excluded);
+    }
+
+    for included in state.included.lines() {
+        cmd.arg("--include").arg(included);
+    }
+
     cmd.arg(&state.src);
     cmd.arg(&state.dest);
 
@@ -111,8 +120,16 @@ fn create_rsync_dry_run_command(state: &AppState) -> Command {
     cmd.arg("-an");
     cmd.arg("--stats");
 
-    cmd.arg(state.src.clone());
-    cmd.arg(state.dest.clone());
+    for excluded in state.excluded.lines() {
+        cmd.arg("--exclude").arg(excluded);
+    }
+
+    for included in state.included.lines() {
+        cmd.arg("--include").arg(included);
+    }
+
+    cmd.arg(&state.src);
+    cmd.arg(&state.dest);
 
     cmd
 }
@@ -379,78 +396,94 @@ impl eframe::App for AppState {
                         });
                     });
             } else {
-                ui.horizontal(|ui| {
-                    ui.label("Source:");
-                    ui.text_edit_singleline(&mut self.src);
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Source:");
+                            ui.text_edit_singleline(&mut self.src);
+                        });
 
-                ui.horizontal(|ui| {
-                    ui.label("Destination:");
-                    ui.text_edit_singleline(&mut self.dest);
-                });
+                        ui.horizontal(|ui| {
+                            ui.label("Destination:");
+                            ui.text_edit_singleline(&mut self.dest);
+                        });
 
-                let command = create_rsync_command(self);
-                ui.group(|ui| {
-                    ui.label("Command:");
-                    ui.label(format!("{:?}", command));
-                });
+                        let command = create_rsync_command(self);
+                        ui.group(|ui| {
+                            ui.label("Command:");
+                            ui.label(format!("{:?}", command));
+                        });
 
-                ui.checkbox(&mut self.archive, "Archive (-a)");
-                ui.add_enabled(!self.archive, Checkbox::new(&mut self.recursive, "Recursive (-r)"));
-                ui.add_enabled(!self.archive, Checkbox::new(&mut self.symlinks, "Symlinks (-l)"));
-                ui.add_enabled(!self.archive, Checkbox::new(&mut self.permissions, "Save Permissions (-p)"));
-                ui.add_enabled(!self.archive, Checkbox::new(&mut self.time, "Save Modification Time (-t)"));
-                ui.add_enabled(!self.archive, Checkbox::new(&mut self.group, "Save Group (-g)"));
-                ui.checkbox(&mut self.compress, "Compress (-z)");
+                        ui.checkbox(&mut self.archive, "Archive (-a)");
+                        ui.add_enabled(!self.archive, Checkbox::new(&mut self.recursive, "Recursive (-r)"));
+                        ui.add_enabled(!self.archive, Checkbox::new(&mut self.symlinks, "Symlinks (-l)"));
+                        ui.add_enabled(!self.archive, Checkbox::new(&mut self.permissions, "Save Permissions (-p)"));
+                        ui.add_enabled(!self.archive, Checkbox::new(&mut self.time, "Save Modification Time (-t)"));
+                        ui.add_enabled(!self.archive, Checkbox::new(&mut self.group, "Save Group (-g)"));
+                        ui.checkbox(&mut self.compress, "Compress (-z)");
 
-                if ui.button("Run").clicked() {
-                    self.error_logs.clear();
-                    self.logs.clear();
-                    self.is_finished = false;
-                    self.current_progress = Progress::default();
+                        ui.collapsing("Excluded", |ui| {
+                            ui.label("Excluded (per-line):");
+                            ui.add_space(1f32);
+                            ui.text_edit_multiline(&mut self.excluded);
+                        });
 
-                    let mut dry_run = create_rsync_dry_run_command(self);
-                    let output = dry_run.output().context("Failed to run dry-run").unwrap();
-                    let result = String::from_utf8_lossy(&output.stdout).to_string();
-                    let result_err = String::from_utf8_lossy(&output.stderr).to_string();
+                        ui.collapsing("Included", |ui| {
+                            ui.label("Included (per-line):");
+                            ui.add_space(1f32);
+                            ui.text_edit_multiline(&mut self.included);
+                        });
 
-                    if !result_err.trim().is_empty() {
-                        self.error_logs.push_str(&result_err);
-                        self.error_logs.push('\n');
-                        if result_err.contains("Permission denied") {
-                            self.error_logs.push_str("Access denied when connecting to the server via SSH. Please check if your SSH key is configured.\n");
-                            return;
+                        if ui.button("Run").clicked() {
+                            self.error_logs.clear();
+                            self.logs.clear();
+                            self.is_finished = false;
+                            self.current_progress = Progress::default();
+
+                            let mut dry_run = create_rsync_dry_run_command(self);
+                            let output = dry_run.output().context("Failed to run dry-run").unwrap();
+                            let result = String::from_utf8_lossy(&output.stdout).to_string();
+                            let result_err = String::from_utf8_lossy(&output.stderr).to_string();
+
+                            if !result_err.trim().is_empty() {
+                                self.error_logs.push_str(&result_err);
+                                self.error_logs.push('\n');
+                                if result_err.contains("Permission denied") {
+                                    self.error_logs.push_str("Access denied when connecting to the server via SSH. Please check if your SSH key is configured.\n");
+                                    return;
+                                }
+                            }
+
+                            let data = parse_rsync_stats(&result);
+                            let number_of_files = data.get("Number of files (regular)");
+                            if number_of_files.is_none() {
+                                self.error_logs.push_str("Could not determine the file count for the transfer.\n");
+                                self.error_logs.push_str(&result);
+                                self.error_logs.push('\n');
+                                return;
+                            }
+
+                            let command = create_rsync_command(self);
+                            let rx = run_rsync(command, number_of_files.unwrap().replace(".", "").parse::<u64>().unwrap(), ctx.clone());
+                            self.progress = Some(rx.0);
+                            self.child = Some(rx.1);
                         }
-                    }
 
-                    let data = parse_rsync_stats(&result);
-                    let number_of_files = data.get("Number of files (regular)");
-                    if number_of_files.is_none() {
-                        self.error_logs.push_str("Could not determine the file count for the transfer.\n");
-                        self.error_logs.push_str(&result);
-                        self.error_logs.push('\n');
-                        return;
-                    }
-
-                    let command = create_rsync_command(self);
-                    let rx = run_rsync(command, number_of_files.unwrap().replace(".", "").parse::<u64>().unwrap(), ctx.clone());
-                    self.progress = Some(rx.0);
-                    self.child = Some(rx.1);
-                }
-
-                if !self.error_logs.is_empty() {
-                    ui.group(|ui| {
-                        ui.label("Errors");
-                        ui.add_space(1f32);
-                        egui::ScrollArea::vertical()
-                            .stick_to_bottom(true)
-                            .auto_shrink([false; 2])
-                            .max_height(100.0)
-                            .show(ui, |ui| {
-                                ui.label(&self.error_logs);
+                        if !self.error_logs.is_empty() {
+                            ui.group(|ui| {
+                                ui.label("Errors");
+                                ui.add_space(1f32);
+                                egui::ScrollArea::vertical()
+                                    .stick_to_bottom(true)
+                                    .auto_shrink([false; 2])
+                                    .max_height(100.0)
+                                    .show(ui, |ui| {
+                                        ui.label(&self.error_logs);
+                                    });
                             });
+                        }
                     });
-                }
             }
         });
     }
@@ -458,7 +491,7 @@ impl eframe::App for AppState {
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([550.0, 550.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([550.0, 650.0]),
         ..Default::default()
     };
 
