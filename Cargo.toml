@@ -1,0 +1,11 @@
+[package]
+name = "r-synced"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.32.3"
+regex = "1"
+lazy_static = "1.5.0"
+anyhow = "1.0.100"
+nix = { version = "0.30", features = ["signal"] }
