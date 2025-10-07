@@ -3,7 +3,7 @@ mod utils;
 use crate::utils::{format_bytes, parse_rsync_progress};
 use anyhow::Context;
 use eframe::egui;
-use eframe::egui::{Checkbox, ProgressBar, Vec2};
+use eframe::egui::{Checkbox, DragValue, ProgressBar, Vec2};
 use lazy_static::lazy_static;
 use nix::sys::signal;
 use nix::sys::signal::Signal;
@@ -64,6 +64,12 @@ struct AppState {
     time: bool,
     group: bool,
     compress: bool,
+    dry_run: bool,
+    checksum: bool,
+
+    limit_bw: bool,
+    bwlimit_kbps: u32,
+
     excluded: String,
     included: String,
 }
@@ -96,6 +102,18 @@ fn create_rsync_command(state: &AppState) -> Command {
 
     if state.compress {
         cmd.arg("-z");
+    }
+
+    if state.dry_run {
+        cmd.arg("-n");
+    }
+
+    if state.checksum {
+        cmd.arg("-c");
+    }
+
+    if state.limit_bw {
+        cmd.arg(format!("--bwlimit={}", state.bwlimit_kbps));
     }
 
     for excluded in state.excluded.lines() {
@@ -422,6 +440,20 @@ impl eframe::App for AppState {
                         ui.add_enabled(!self.archive, Checkbox::new(&mut self.time, "Save Modification Time (-t)"));
                         ui.add_enabled(!self.archive, Checkbox::new(&mut self.group, "Save Group (-g)"));
                         ui.checkbox(&mut self.compress, "Compress (-z)");
+                        ui.checkbox(&mut self.checksum, "Checksum (-c)");
+                        ui.checkbox(&mut self.dry_run, "Dry Run (-n)");
+
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.limit_bw, "Speed Limit:");
+
+                            ui.add_enabled_ui(self.limit_bw, |ui| {
+                                let bw_drag_value = DragValue::new(&mut self.bwlimit_kbps)
+                                    .range(1..=1000000)
+                                    .speed(10.0)
+                                    .suffix(" KB/s");
+                                ui.add(bw_drag_value);
+                            });
+                        });
 
                         ui.collapsing("Excluded", |ui| {
                             ui.label("Excluded (per-line):");
